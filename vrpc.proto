@@ -1,0 +1,12 @@
+// protoc --go_out=. vrpc.proto
+syntax = "proto3";
+
+package vrpc;
+option go_package = "./;vrpc";
+
+message Input{
+  repeated Row row = 1;
+  message Row {
+    bytes data = 1;
+  }
+}
