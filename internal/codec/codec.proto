@@ -1,0 +1,28 @@
+// protoc --go_out=. codec.proto
+syntax = "proto3";
+
+package vrpc;
+option go_package = "./;codec";
+
+message Base {
+  int64 id = 1;                          // 消息唯一ID
+  string service = 2;                    // 服务名称
+  string method = 3;                     // 方法名称
+  bytes payload = 4;                     // 序列化后的请求参数
+  map<string, StringList> metadata = 5;  // 元数据（string -> []string）
+  int64 timestamp = 6;                   // 时间戳
+}
+
+message StringList {repeated string items = 1;}  // 内联定义
+
+// Request 请求消息结构
+message Request {
+  Base base = 1;
+}
+
+// Response 响应消息结构
+message Response {
+  Base base = 1;
+  int32 status = 2;                  // 状态码
+  string error = 3;                  // 错误信息
+}

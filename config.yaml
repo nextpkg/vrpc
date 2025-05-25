@@ -1,0 +1,13 @@
+Name: "MyService"
+Environment: "development"
+Port: 8080
+
+# Kafka插件配置
+kafka:
+  Test: 123
+
+# NATS插件配置
+nats:
+  Url: "nats://localhost:4222"
+  Username: "user"
+  Password: "pass"
