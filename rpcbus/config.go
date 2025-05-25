@@ -3,36 +3,12 @@ package rpcbus
 
 import (
 	"errors"
-	"sync"
 
 	"github.com/zeromicro/go-zero/core/conf"
 )
 
-// Plugin 接口定义了插件的行为
-type Plugin interface {
-	// Init 初始化插件（可能会使用配置）
-	Init() error
-	// GetConfig 获取最新的配置
-	GetConfig() interface{}
-}
-
 // PluginFactory 定义了创建插件的工厂函数类型
 type PluginFactory func() Plugin
-
-// PluginManager 管理所有注册的插件
-type PluginManager struct {
-	factories map[string]PluginFactory
-	plugins   map[string]Plugin
-	mu        sync.RWMutex
-}
-
-// NewPluginManager 创建一个新的插件管理器
-func NewPluginManager() *PluginManager {
-	return &PluginManager{
-		factories: make(map[string]PluginFactory),
-		plugins:   make(map[string]Plugin),
-	}
-}
 
 // Register 注册一个插件工厂
 func (pm *PluginManager) Register(name string, factory PluginFactory) {
@@ -86,13 +62,24 @@ type Config struct {
 
 // KafkaConfig 是 Kafka 插件的配置
 type KafkaConfig struct {
-	Test int `json:"test" yaml:"test"`
+	Brokers []string `json:"brokers" yaml:"brokers"`
+	Group   string   `json:"group" yaml:"group"`
+	Topic   string   `json:"topic" yaml:"topic"`
+}
+
+// KqConfig 是 go-queue/kq 插件的配置
+type KqConfig struct {
+	Brokers []string `json:"brokers" yaml:"brokers"`
+	Group   string   `json:"group" yaml:"group"`
+	Topic   string   `json:"topic" yaml:"topic"`
+	Offset  string   `json:"offset,optional" yaml:"offset,optional"` // first或last，默认last
 }
 
 // PluginConfig 包含所有插件的配置
 type PluginConfig struct {
 	Config
 	Kafka *KafkaConfig `json:"kafka" yaml:"kafka"`
+	Kq    *KqConfig    `json:"kq" yaml:"kq"`
 }
 
 // LoadConfig 加载配置文件

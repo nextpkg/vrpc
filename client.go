@@ -1,117 +1,223 @@
 package vrpc
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/nextpkg/vrpc/internal/codec"
+	"github.com/nextpkg/vrpc/rpcbus"
+	"github.com/nextpkg/vrpc/rpcbus/kafka"
+	"github.com/nextpkg/vrpc/rpcbus/kq"
+	"github.com/zeromicro/go-zero/core/logx"
 )
 
-// Client 处理vRPC通信的客户端
+// Client vRPC客户端
 type Client struct {
-	upstreamProxy *UpstreamProxy
-	correlationID int64
-	responses     map[int64]chan *codec.Response
-	mu            sync.Mutex
-	timeout       time.Duration
+	config    *Config
+	conn      *ResponseConnection
+	upstream  *UpstreamProxy
+	pluginMgr *rpcbus.PluginManager
+	producer  rpcbus.MessageProducer
+	coder     *codec.Coder
+	responses map[string]chan *codec.Response
+	respMutex sync.RWMutex
 }
 
-func NewClient(cfg *Config) *Client {
-	// 创建Kafka生产者
-	producer := kafka.NewKafkaProducer(&cfg.Request)
+// NewClient 创建一个新的vRPC客户端
+func NewClient(config *Config) (*Client, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 
-	// 创建Kafka消费者
-	consumer := kafka.NewKafkaConsumer(&cfg.Respond, func(ctx context.Context, key, value string) error {
-		resp := &Response{}
-		if err := proto.Unmarshal(msg.Value, resp); err != nil {
-			log.Printf("Failed to unmarshal response: %v", err)
-			continue
-		}
+	// 创建插件管理器
+	pluginMgr := rpcbus.NewPluginManager()
 
-		client.HandleResponse(resp)
-	})
+	// 注册内置插件
+	registerBuiltinPlugins(pluginMgr)
+
+	// 创建编解码器
+	coder := codec.NewCoder()
+
+	// 创建客户端
+	client := &Client{
+		config:    config,
+		pluginMgr: pluginMgr,
+		coder:     coder,
+		responses: make(map[string]chan *codec.Response),
+	}
+
+	return client, nil
+}
+
+// registerBuiltinPlugins 注册内置插件
+func registerBuiltinPlugins(pluginMgr *rpcbus.PluginManager) {
+	// 注册Kafka插件
+	kafkaPlugin := kafka.NewKafkaPlugin()
+	kafkaPlugin.Register(pluginMgr)
+
+	// 注册Kq插件
+	kqPlugin := kq.NewKqPlugin()
+	kqPlugin.Register(pluginMgr)
+}
+
+// RegisterPlugin 注册插件
+func (c *Client) RegisterPlugin(plugin rpcbus.Plugin) {
+	plugin.Register(c.pluginMgr)
+}
+
+// Init 初始化客户端
+func (c *Client) Init() error {
+	// 初始化插件
+	if err := c.pluginMgr.InitPlugin(c.config.PluginName, c.config.PluginConfig); err != nil {
+		return fmt.Errorf("failed to init plugin: %w", err)
+	}
+
+	// 获取插件
+	plugin, err := c.pluginMgr.GetPlugin(c.config.PluginName)
+	if err != nil {
+		return fmt.Errorf("failed to get plugin: %w", err)
+	}
+
+	// 创建生产者
+	producer, err := plugin.CreateProducer()
+	if err != nil {
+		return fmt.Errorf("failed to create producer: %w", err)
+	}
+	c.producer = producer
 
 	// 创建上游代理
-	upstreamProxy := &UpstreamProxy{
-		producer: producer,
-		consumer: consumer,
+	c.upstream = NewUpstreamProxy(c.producer, c.config.RequestTopic)
+
+	// 创建响应连接
+	consumer, err := plugin.CreateConsumer()
+	if err != nil {
+		return fmt.Errorf("failed to create consumer: %w", err)
 	}
 
-	// 创建vRPC客户端
-	client := &Client{
-		upstreamProxy: upstreamProxy,
-		responses:     make(map[int64]chan *codec.Response),
+	// 创建响应连接的生产者
+	respProducer, err := plugin.CreateProducer()
+	if err != nil {
+		return fmt.Errorf("failed to create response producer: %w", err)
 	}
 
-	return &Client{
-		upstreamProxy: upstream,
-		responses:     make(map[int64]chan *codec.Response),
-	}
+	c.conn = NewResponseConnection(respProducer, c.config.ResponseTopic)
+
+	// 启动响应处理
+	go c.handleResponses()
+
+	return nil
 }
 
-// Call 执行vRPC调用
-func (c *Client) Call(ctx context.Context, method string, req, reply any) error {
-	// 生成相关ID
-	c.mu.Lock()
-	corrID := c.correlationID
-	c.correlationID++
-	c.mu.Unlock()
+// Call 调用远程方法
+func (c *Client) Call(ctx context.Context, serviceName, methodName string, request interface{}, response interface{}) error {
+	// 创建请求ID
+	requestID := generateRequestID()
 
 	// 创建响应通道
-	respChan := make(chan *codec.Response, 1)
-	c.mu.Lock()
-	c.responses[corrID] = respChan
-	c.mu.Unlock()
+	respCh := make(chan *codec.Response, 1)
+	c.respMutex.Lock()
+	c.responses[requestID] = respCh
+	c.respMutex.Unlock()
 
-	// 序列化请求
-	reqBytes, err := jsoniter.Marshal(req)
+	// 清理函数
+	defer func() {
+		c.respMutex.Lock()
+		delete(c.responses, requestID)
+		c.respMutex.Unlock()
+		close(respCh)
+	}()
+
+	// 编码请求数据
+	reqData, err := c.coder.EncodeRequest(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	// 创建请求消息
-	request := &codec.Request{
+	// 创建请求
+	req := &codec.Request{
 		Base: &codec.Base{
-			Id:        corrID,
-			Method:    method,
-			Payload:   reqBytes,
+			Id:        requestID,
+			Service:   serviceName,
+			Method:    methodName,
 			Timestamp: time.Now().UnixNano(),
+			Payload:   reqData,
 		},
 	}
 
-	// 发送请求到上游代理
-	err = c.upstreamProxy.Send(request)
-	if err != nil {
-		return err
+	// 发送请求
+	if err := c.upstream.Send(ctx, req); err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// 等待响应
+	// 等待响应或超时
 	select {
-	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.responses, corrID)
-		c.mu.Unlock()
-		return ctx.Err()
-	case resp := <-respChan:
+	case resp := <-respCh:
 		if resp.Error != "" {
 			return errors.New(resp.Error)
 		}
-
-		// 反序列化响应
-		return jsoniter.Unmarshal(resp.Base.Payload, reply)
+		return c.coder.DecodeResponse(resp.Base.Payload, response)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(c.config.Timeout):
+		return errors.New("rpc call timeout")
 	}
 }
 
-// HandleResponse 处理来自下游的响应
-func (c *Client) HandleResponse(resp *Response) {
-	c.mu.Lock()
-	ch, ok := c.responses[resp.CorrelationID]
-	delete(c.responses, resp.CorrelationID)
-	c.mu.Unlock()
+// Close 关闭客户端
+func (c *Client) Close() error {
+	var errs []error
 
-	if ok {
-		ch <- resp
-		close(ch)
+	// 关闭响应连接
+	if c.conn != nil {
+		if err := c.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close response connection: %w", err))
+		}
 	}
+
+	// 关闭生产者
+	if c.producer != nil {
+		if err := c.producer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close producer: %w", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing client: %v", errs)
+	}
+
+	return nil
+}
+
+// handleResponses 处理响应
+func (c *Client) handleResponses() {
+	err := c.conn.Consume(context.Background(), func(response *codec.Response) error {
+		if response.Base == nil {
+			logx.Error("Received response with nil base")
+			return nil
+		}
+
+		c.respMutex.RLock()
+		respCh, ok := c.responses[response.Base.Id]
+		c.respMutex.RUnlock()
+
+		if !ok {
+			logx.Infof("Response for unknown request ID: %s", response.Base.Id)
+			return nil
+		}
+
+		respCh <- response
+		return nil
+	})
+
+	if err != nil {
+		logx.Errorf("Error consuming responses: %v", err)
+	}
+}
+
+// generateRequestID 生成请求ID
+func generateRequestID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
