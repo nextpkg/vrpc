@@ -1,41 +1,47 @@
 package vrpc
 
 import (
-	"errors"
-	"time"
+	"github.com/nextpkg/vrpc/rpcbus"
+	"github.com/zeromicro/go-zero/rest"
+	"github.com/zeromicro/go-zero/zrpc"
 )
 
-// Config 是vRPC的主配置结构
 type Config struct {
-	// 插件名称，如"kafka"或"kq"
-	PluginName string `json:"plugin_name" yaml:"plugin_name"`
-	// 插件配置，根据PluginName确定具体类型
-	PluginConfig interface{} `json:"plugin_config" yaml:"plugin_config"`
-	// 请求主题
-	RequestTopic string `json:"request_topic" yaml:"request_topic"`
-	// 响应主题
-	ResponseTopic string `json:"response_topic" yaml:"response_topic"`
-	// 超时设置
-	Timeout time.Duration `json:"timeout" yaml:"timeout"`
+	// 服务配置
+	Name string `json:",default=vrpc-server"`
+	Host string `json:",default=0.0.0.0"`
+	Port int    `json:",default=8080"`
+
+	// gRPC服务配置
+	RpcServerConf zrpc.RpcServerConf
+
+	// REST API配置
+	RestConf rest.RestConf
+
+	// MQ配置
+	RpcBus rpcbus.Config
+
+	// Topic配置
+	Topics struct {
+		Request  string `json:",default=vrpc.requests"`
+		Response string `json:",default=vrpc.responses"`
+	}
+
+	// 目标RPC服务配置
+	Targets map[string]Target
+
+	// 插件配置
+	Plugins []PluginConfig
 }
 
-// Validate 验证配置是否有效
-func (c *Config) Validate() error {
-	if c.PluginName == "" {
-		return errors.New("plugin name cannot be empty")
-	}
+type Target struct {
+	Endpoint string            `json:"endpoint"`
+	Timeout  string            `json:"timeout,default=30s"`
+	Settings map[string]string `json:"settings"`
+}
 
-	if c.RequestTopic == "" {
-		return errors.New("request topic cannot be empty")
-	}
-
-	if c.ResponseTopic == "" {
-		return errors.New("response topic cannot be empty")
-	}
-
-	if c.Timeout <= 0 {
-		c.Timeout = 5 * time.Second // 设置默认超时时间
-	}
-
-	return nil
+type PluginConfig struct {
+	Name     string                 `json:"name"`
+	Enabled  bool                   `json:"enabled,default=true"`
+	Settings map[string]interface{} `json:"settings"`
 }

@@ -1,13 +1,20 @@
-Name: "MyService"
-Environment: "development"
-Port: 8080
+# config/vrpc.yaml
+mq:
+  type: kafka
+  brokers:
+    - localhost:9092
+  topic: vrpc
+  settings:
+    compression: gzip
+    batch_size: 100
+    linger_ms: 10
 
-# Kafka插件配置
-kafka:
-  Test: 123
+timeout:
+  request: 30s
+  connect: 5s
 
-# NATS插件配置
-nats:
-  Url: "nats://localhost:4222"
-  Username: "user"
-  Password: "pass"
+retry:
+  count: 3
+  interval: 100ms
+
+debug: true

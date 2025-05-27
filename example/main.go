@@ -2,76 +2,127 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"time"
 
-	"github.com/nextpkg/vrpc/example/nextcfg"
-	"github.com/nextpkg/vrpc/example/nextcfgclient"
+	"github.com/nextpkg/vrpc"
 	"github.com/nextpkg/vrpc/rpcbus"
-	"github.com/nextpkg/vrpc/rpcbus/kafka"
-	"github.com/zeromicro/go-queue/kq"
-	"github.com/zeromicro/go-zero/core/logx"
+	"github.com/nextpkg/vrpc/vclient"
+	"github.com/nextpkg/vrpc/vserver"
 	"github.com/zeromicro/go-zero/zrpc"
 )
 
 func main() {
-	// 1. 加载配置
-	cfg, err := rpcbus.LoadConfig("config.yaml")
+	// 示例1: 启动vRPC服务器
+	go startServer()
+
+	// 等待服务器启动
+	time.Sleep(2 * time.Second)
+
+	// 示例2: 使用vRPC客户端
+	useClient()
+}
+
+func startServer() {
+	// 服务器配置
+	config := &vrpc.Config{
+		Name: "vrpc-server",
+		Host: "0.0.0.0",
+		Port: 8080,
+		RpcServerConf: zrpc.RpcServerConf{
+			ListenOn: "0.0.0.0:9090",
+		},
+		RpcBus: rpcbus.Config{
+			Type:    "kafka",
+			Brokers: []string{"localhost:9092"},
+		},
+		Topics: struct {
+			Request  string `json:",default=vrpc.requests"`
+			Response string `json:",default=vrpc.responses"`
+		}{
+			Request:  "vrpc.requests",
+			Response: "vrpc.responses",
+		},
+		Targets: map[string]vrpc.Target{
+			"demo": {
+				Endpoint: "localhost:8081",
+				Timeout:  "30s",
+			},
+		},
+	}
+
+	// 创建并启动服务器
+	server, err := vserver.NewServer(config)
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	// 2. 创建插件管理器
-	pm := rpcbus.NewPluginManager()
-
-	// 3. 注册 Kafka 插件，传入配置提供者函数
-	kafka.Register(pm, func() *rpcbus.KafkaConfig {
-		return cfg.Kafka
-	})
-
-	// 4. 初始化所有插件
-	if err := pm.Initialize(); err != nil {
-		log.Fatalf("初始化插件失败: %v", err)
+	log.Println("Starting vRPC server...")
+	if err := server.Start(); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
-	kq.KqConf{}
+}
 
-	// 5. 获取 Kafka 插件
-	kafkaPluginInterface, ok := pm.GetPlugin("kafka")
-	if !ok {
-		log.Fatalf("Kafka 插件未注册")
+func useClient() {
+	// 客户端配置
+	config := &vclient.Config{
+		ClientID: "demo-client",
+		RpcBus: rpcbus.Config{
+			Type:    "kafka",
+			Brokers: []string{"localhost:9092"},
+		},
+		Topics: struct {
+			Request  string `json:"request" yaml:"request"`
+			Response string `json:"response" yaml:"response"`
+		}{
+			Request:  "vrpc.requests",
+			Response: "vrpc.responses",
+		},
+		Debug: true,
+	}
+	config.Timeout.Request = 30 * time.Second
+	config.Retry.Count = 3
+	config.Retry.Interval = 100 * time.Millisecond
+
+	// 初始化vRPC客户端
+	if err := vrpc.InitClient(config); err != nil {
+		log.Fatalf("Failed to init client: %v", err)
+	}
+	defer vrpc.Close()
+
+	// 方式1: 直接使用vRPC客户端
+	client := vrpc.GetClient()
+	ctx := context.Background()
+
+	// 模拟请求数据
+	requestData := []byte(`{"message": "Hello vRPC"}`)
+	metadata := map[string]string{
+		"user-id":  "12345",
+		"trace-id": "abc-def-ghi",
 	}
 
-	// 类型断言为 Kafka 插件类型
-	kafkaPlugin, ok := kafkaPluginInterface.(*kafka.KafkaPlugin)
-	if !ok {
-		log.Fatalf("插件类型错误")
-	}
-
-	// 6. 获取 Kafka 配置
-	kafkaConfig := kafkaPlugin.CurrentConfig()
-
-	// 7. 使用配置
-	fmt.Printf("Kafka 配置: Test = %d\n", kafkaConfig.Test)
-
-	// 或者通过插件管理器的通用方法获取配置
-	configInterface, err := pm.GetPluginConfig("kafka")
+	response, err := client.Call(ctx, "demo", "Ping", requestData, metadata)
 	if err != nil {
-		log.Fatalf("获取 Kafka 配置失败: %v", err)
-	}
-	kafkaConfig2 := configInterface.(rpcbus.KafkaConfig)
-	fmt.Printf("Kafka 配置 (通过管理器): Test = %d\n", kafkaConfig2.Test)
-	return
-
-	cc := zrpc.MustNewClient(zrpc.RpcClientConf{
-		Target: "127.0.0.1:8080",
-	})
-
-	resp, err := nextcfgclient.NewNextcfg(cc).Ping(context.Background(), &nextcfg.Request{
-		Ping: "ping",
-	})
-	if err != nil {
-		panic(err)
+		log.Printf("Direct call failed: %v", err)
+	} else {
+		log.Printf("Direct call response: %s", string(response.Payload))
 	}
 
-	logx.Alert(resp.Pong)
+	// 方式2: 使用gRPC拦截器（推荐方式）
+	useGRPCInterceptor()
+}
+
+func useGRPCInterceptor() {
+	// 初始化切面
+	v := zrpc.WithUnaryClientInterceptor(vrpc.Interceptor())
+
+	// 初始化gRPC客户端
+	c := zrpc.MustNewClient(zrpc.RpcClientConf{
+		Endpoints: []string{"localhost:9090"}, // 这里实际不会使用，因为被vRPC拦截
+	}, v)
+
+	// 这里应该是实际的gRPC客户端调用
+	// 例如: resp, err := democlient.NewDemo(c).Ping(ctx, &democlient.Request{})
+	log.Println("gRPC client with vRPC interceptor initialized successfully")
+	log.Println("Client:", c)
 }

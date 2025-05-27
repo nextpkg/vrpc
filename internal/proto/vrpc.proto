@@ -1,0 +1,48 @@
+// protoc vrpc.proto --go_out=. --go-grpc_out=.
+syntax = "proto3";
+
+package vrpc;
+option go_package = "./gen";
+
+// vRPC请求消息
+message VRPCRequest {
+  string request_id = 1;           // 请求ID
+  string service_name = 2;         // 服务名
+  string method_name = 3;          // 方法名
+  bytes payload = 4;               // 请求载荷
+  map<string, string> metadata = 5; // 元数据
+  int64 timestamp = 6;             // 时间戳
+  int32 timeout_ms = 7;            // 超时时间(毫秒)
+  string client_id = 8;            // 客户端ID
+}
+
+// vRPC响应消息
+message VRPCResponse {
+  string request_id = 1;           // 请求ID
+  bytes payload = 2;               // 响应载荷
+  int32 status_code = 3;           // 状态码
+  string error_message = 4;        // 错误信息
+  map<string, string> metadata = 5; // 元数据
+  int64 timestamp = 6;             // 时间戳
+}
+
+// 健康检查请求
+message HealthCheckRequest {
+  string service = 1;
+}
+
+// 健康检查响应
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}
+
+// vRPC服务定义
+service VRPCService {
+  rpc Call(VRPCRequest) returns (VRPCResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
